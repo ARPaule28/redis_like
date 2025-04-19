@@ -1,4 +1,4 @@
-# Python Key-Value Store
+# Python Redis-like
 
 ## Overview
 
