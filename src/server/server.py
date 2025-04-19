@@ -1,75 +1,88 @@
 import socket
 import threading
-from typing import Dict, Callable
+from typing import Dict, Any
 from core.data_store import DataStore
-from structures import (
-    StringOps, ListOps, HashOps, 
-    SetOps, SortedSetOps, StreamOps
-)
+from .handlers import CommandHandler
 
 class RedisServer:
-    def __init__(self):
+    def __init__(self, host: str = 'localhost', port: int = 6379):
+        self.host = host
+        self.port = port
         self._data_store = DataStore()
-        self._string_ops = StringOps(self._data_store)
-        self._list_ops = ListOps(self._data_store)
-        self._stream_ops = StreamOps()
-        self._commands: Dict[str, Callable] = self._register_commands()
+        self._handler = CommandHandler(self._data_store)
+        self._running = False
+        self._threads = []
+        self._cleaner_thread = threading.Thread(
+            target=self._clean_expired_keys, 
+            daemon=True
+        )
     
-    def _register_commands(self) -> Dict[str, Callable]:
-        return {
-            # String commands
-            'SET': self._string_ops.set,
-            'GET': self._string_ops.get,
-            'APPEND': self._string_ops.append,
-            'INCR': self._string_ops.incr,
-            
-            # List commands
-            'LPUSH': self._list_ops.lpush,
-            'RPUSH': self._list_ops.rpush,
-            'LRANGE': self._list_ops.lrange,
-            
-            # Stream commands
-            'XADD': self._stream_ops.xadd,
-            'XRANGE': self._stream_ops.xrange,
-        }
-    
-    def handle_command(self, command: str, *args) -> str:
-        cmd = command.upper()
-        if cmd not in self._commands:
-            return f"ERR unknown command '{command}'"
+    def start(self) -> None:
+        """Start the Redis server"""
+        self._running = True
+        self._cleaner_thread.start()
         
-        try:
-            result = self._commands[cmd](*args)
-            return str(result) if result is not None else "(nil)"
-        except Exception as e:
-            return f"ERR {str(e)}"
-    
-    def start(self, host='localhost', port=6379):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind((host, port))
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind((self.host, self.port))
             s.listen()
-            print(f"Server running on {host}:{port}")
+            print(f"Server started on {self.host}:{self.port}")
             
-            while True:
-                conn, addr = s.accept()
-                threading.Thread(
-                    target=self._handle_connection, 
-                    args=(conn,)
-                ).start()
-    
-    def _handle_connection(self, conn):
-        with conn:
-            while True:
+            while self._running:
                 try:
-                    data = conn.recv(1024).decode().strip()
+                    conn, addr = s.accept()
+                    thread = threading.Thread(
+                        target=self._handle_connection,
+                        args=(conn, addr)
+                    )
+                    self._threads.append(thread)
+                    thread.start()
+                except OSError:
+                    break  # Server is shutting down
+    
+    def stop(self) -> None:
+        """Stop the Redis server"""
+        self._running = False
+        # Create a dummy connection to unblock accept()
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.connect((self.host, self.port))
+        except:
+            pass
+        
+        for thread in self._threads:
+            thread.join()
+    
+    def _handle_connection(self, conn: socket.socket, addr: Any) -> None:
+        """Handle a client connection"""
+        with conn:
+            print(f"New connection from {addr}")
+            while self._running:
+                try:
+                    data = conn.recv(1024)
                     if not data:
                         break
                     
-                    parts = data.split()
+                    # Parse Redis protocol (simplified)
+                    parts = data.decode().strip().split()
+                    if not parts:
+                        continue
+                    
                     command = parts[0]
                     args = parts[1:]
                     
-                    response = self.handle_command(command, *args)
+                    # Handle command
+                    response = self._handler.handle_command(command, args)
                     conn.sendall(response.encode())
-                except ConnectionError:
+                except (ConnectionError, UnicodeDecodeError):
                     break
+                except Exception as e:
+                    error_msg = f"-ERR {str(e)}\r\n"
+                    conn.sendall(error_msg.encode())
+    
+    def _clean_expired_keys(self) -> None:
+        """Background task to clean expired keys"""
+        import time
+        while self._running:
+            time.sleep(1)
+            self._data_store._clean_expired()
