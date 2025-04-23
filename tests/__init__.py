@@ -1,6 +1,6 @@
 from .test_core import TestDataStore, TestExceptions
 from .test_server import TestRedisServer
-from .test_structure import (
+from .test_structures import (
     TestStrings,
     TestLists,
     TestHashes,
